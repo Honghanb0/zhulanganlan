@@ -1,0 +1,100 @@
+### Python ###
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.dist/
+.build/
+*.whl
+*.egg
+MANIFEST
+
+### Virtual Environment ###
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+### IDE ###
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+
+### Jupyter Notebook ###
+.ipynb_checkpoints/
+*.ipynb
+
+### Logs ###
+logs/
+*.log
+*.log.*
+training_log.txt
+train_log.txt
+
+### Models ###
+models/
+*.pkl
+*.joblib
+*.h5
+*.pt
+*.pth
+*.onnx
+
+### Output ###
+output/
+*.csv
+*.parquet
+
+### Dataset ###
+data/
+*.csv
+*.parquet
+*.pkl
+*.hdf5
+*.txt
+*.zip
+*.tar.gz
+*.rar
+
+### OS Files ###
+Desktop.ini
+$RECYCLE.BIN/
+*.tmp
+*.temp
+
+### LightGBM/XGBoost ###
+*.lgb
+*.bst
+
+### Matplotlib ###
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.pdf
+
+### Configuration ###
+.env
+.env.local
+.env.*.local
+
+### Testing ###
+.pytest_cache/
+.coverage
+htmlcov/
+.pytest/
+
+### Build ###
+build/
+dist/
