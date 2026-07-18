@@ -1,17 +1,52 @@
 import pandas as pd
 import numpy as np
+import pyarrow.parquet as pq
 from config import TRAIN_FILE, VALID_FILE, LABEL_MAPPING, SEED, SAMPLE_SIZE
 
 def load_train_data(sample_size=None):
-    df = pd.read_parquet(TRAIN_FILE)
-    df['label'] = df['label_binary'].map(LABEL_MAPPING)
-    
     sample_size = sample_size or SAMPLE_SIZE
-    if len(df) > sample_size:
-        df = df.groupby('label_binary', group_keys=False).apply(
-            lambda x: x.sample(min(len(x), sample_size // 3), random_state=SEED)
-        ).reset_index(drop=True)
     
+    parquet_file = pq.ParquetFile(TRAIN_FILE)
+    total_rows = parquet_file.metadata.num_rows
+    
+    if total_rows <= sample_size:
+        df = parquet_file.read().to_pandas()
+    else:
+        num_row_groups = parquet_file.num_row_groups
+        rows_per_group = []
+        for i in range(num_row_groups):
+            rows_per_group.append(parquet_file.metadata.row_group(i).num_rows)
+        
+        cumulative_rows = np.cumsum(rows_per_group)
+        target_rows_per_class = sample_size // 3
+        
+        sampled_rows = []
+        current_counts = {'benign': 0, 'malicious': 0, 'suspicious': 0}
+        
+        np.random.seed(SEED)
+        group_order = np.random.permutation(num_row_groups)
+        
+        for group_idx in group_order:
+            table = parquet_file.read_row_group(group_idx)
+            df_group = table.to_pandas()
+            
+            for label in ['benign', 'malicious', 'suspicious']:
+                if current_counts[label] >= target_rows_per_class:
+                    continue
+                mask = df_group['label_binary'] == label
+                remaining = target_rows_per_class - current_counts[label]
+                df_label = df_group[mask]
+                if len(df_label) > remaining:
+                    df_label = df_label.sample(n=remaining, random_state=SEED)
+                sampled_rows.append(df_label)
+                current_counts[label] += len(df_label)
+            
+            if all(c >= target_rows_per_class for c in current_counts.values()):
+                break
+        
+        df = pd.concat(sampled_rows, ignore_index=True)
+    
+    df['label'] = df['label_binary'].map(LABEL_MAPPING)
     df = df.sample(frac=1, random_state=SEED).reset_index(drop=True)
     return df
 
