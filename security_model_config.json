@@ -1,0 +1,47 @@
+{
+  "version": "3.0.0",
+  "seed": 42,
+  "label_column": "label_binary",
+  "id_column": "event_id",
+  "timestamp_column": "timestamp",
+  "labels": ["benign", "suspicious", "malicious"],
+  "validation": {
+    "folds": 3,
+    "max_rows": 600000,
+    "group_column": "message_sanitized"
+  },
+  "sampling": {
+    "benign_to_threat_ratio": 4.0,
+    "keep_security_keyword_benign": true
+  },
+  "features": {
+    "hash_buckets": 16384,
+    "rare_min_count": 5,
+    "window_seconds": [300, 3600, 86400]
+  },
+  "model": {
+    "n_estimators": 1400,
+    "learning_rate": 0.035,
+    "num_leaves": 96,
+    "max_depth": -1,
+    "min_child_samples": 80,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "reg_alpha": 0.1,
+    "reg_lambda": 0.5,
+    "early_stopping_rounds": 100,
+    "n_jobs": -1
+  },
+  "threshold_search": {
+    "minimum_malicious_recall": 0.97,
+    "minimum_threat_recall": 0.97,
+    "threat_thresholds": [0.05, 0.08, 0.1, 0.12, 0.15, 0.18, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9],
+    "malicious_thresholds": [0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8],
+    "ensemble_weights": [0.25, 0.5, 0.75]
+  },
+  "paths": {
+    "train": "data/train.parquet",
+    "model_dir": "models_v3",
+    "report_dir": "output/v3_evaluation"
+  }
+}

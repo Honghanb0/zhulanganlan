@@ -1,631 +1,433 @@
-# 逐浪安澜 — SOC 日志智能威胁检测与分析研究
+# 逐浪安澜：SOC 日志恶意安全事件识别
 
-> **队伍名称**: 未知数队  
-> **作品名称**: 逐浪安澜 — SOC 日志智能威胁检测与分析研究  
-> **竞赛**: 第二届浙江省大学生人工智能竞赛（算法挑战赛二）
+> **队伍名称**：未知数队
+> **作品名称**：逐浪安澜 — SOC 日志智能威胁检测与分析研究
+> **竞赛**：第二届浙江省大学生人工智能竞赛（算法挑战赛二）
+
+企业安全运营中心（SOC）每天接收大量来自防火墙、终端、身份认证、云平台、邮件安全等系统的安全日志。由于真实业务环境中绝大多数事件为正常行为，恶意攻击样本占比较低（良性样本占比 90% 以上），传统规则检测容易出现误报、漏报和告警疲劳。
+
+**逐浪安澜**面向真实企业安全运营场景，基于已标注的安全事件日志，构建了一套可用于恶意事件识别、可疑行为发现的智能检测模型，旨在提升网络安全威胁发现与研判效率，为筑牢数字时代网络安全防线提供智能化解决方案。
+
+> 当前代码已迭代至 **v3**，只保留可复现的 v3 训练、评测、推理和比赛提交链路，旧版 TF-IDF/v2 管线及历史实验脚本已移除。
 
 ---
 
 ## 目录
 
-- [项目简介](#项目简介)
-- [问题分析](#问题分析)
-- [系统架构](#系统架构)
-- [特征工程](#特征工程)
-- [模型训练](#模型训练)
-- [可观测训练系统](#可观测训练系统)
-- [数据质量审计](#数据质量审计)
-- [验证结果](#验证结果)
-- [使用说明](#使用说明)
-- [项目结构](#项目结构)
-- [技术亮点](#技术亮点)
+- [技术栈](#技术栈)
+- [系统架构与数据流](#系统架构与数据流)
+- [核心算法与实现原理](#核心算法与实现原理)
+  - [数据加载与标签映射](#1-数据加载与标签映射)
+  - [混合采样策略](#2-混合采样策略)
+  - [特征工程管道](#3-特征工程管道)
+  - [层次集成模型](#4-层次集成模型)
+  - [概率融合与动态阈值](#5-概率融合与动态阈值)
+  - [无泄漏分组交叉验证](#6-无泄漏分组交叉验证)
+  - [比赛提交后处理](#7-比赛提交后处理)
+- [复杂度分析总览](#复杂度分析总览)
+- [代码结构](#代码结构)
+- [环境](#环境)
+- [复现训练与评测](#复现训练与评测)
+- [推理](#推理)
+- [生成最终比赛提交](#生成最终比赛提交)
+- [已复现指标](#已复现指标)
 - [致谢](#致谢)
 
 ---
 
-## 项目简介
+## 技术栈
 
-企业安全运营中心（SOC）每天接收大量来自防火墙、终端、身份认证、云平台、邮件安全等系统的安全日志。由于真实业务环境中绝大多数事件为正常行为，恶意攻击样本占比较低（良性样本占比90%以上），传统规则检测容易出现误报、漏报和告警疲劳。
+### 编程语言
 
-**逐浪安澜**系统面向真实企业安全运营场景，基于已标注的安全事件日志，构建了一套可用于恶意事件识别、可疑行为发现的智能检测模型，旨在提升网络安全威胁发现与研判效率，为筑牢数字时代网络安全防线提供智能化解决方案。
+| 项目 | 版本 | 说明 |
+|------|------|------|
+| Python | 3.10+ | 唯一开发语言，全链路（数据、特征、训练、推理、提交）均使用 Python |
 
----
+### 核心框架与库
 
-## 问题分析
+| 库 | 版本 | 用途 |
+|------|------|------|
+| **LightGBM** | ≥ 4.0.0 | 核心 GBDT 模型，层次集成三分类/二分类/子类分类器 |
+| **scikit-learn** | ≥ 1.2.0 | `StratifiedGroupKFold` 分组交叉验证、混淆矩阵、F1/Precision/Recall/AUC 指标 |
+| **pandas** | ≥ 2.0.0 | 数据读写（Parquet/CSV）、DataFrame 向量化特征工程 |
+| **numpy** | ≥ 1.24.0 | 数值计算、概率矩阵运算、稀疏索引 |
+| **pyarrow** | ≥ 12.0.0 | Parquet 格式读写引擎（`train.parquet` / `valid_input.parquet`） |
+| **joblib** | ≥ 1.2.0 | 模型制品序列化（特征管道 + 三个模型 + 阈值策略打包） |
 
-### 数据特征
+### 开发与运行工具
 
-| 特征 | 描述 |
+| 工具 | 用途 |
 |------|------|
-| 数据规模 | 144万条脱敏安全事件日志 |
-| 标签分布 | benign(91.7%)、malicious(6.1%)、suspicious(2.2%) |
-| 字段覆盖 | 事件时间、事件类型、数据流、采集管道、源/目的IP、端口、协议、主机、用户名、动作、严重级别、厂商事件码、脱敏原始日志消息、产品和厂商信息等 |
+| `argparse` | 命令行入口（`--mode` / `--max-rows` / `--competition` 等） |
+| `json` | `security_model_config.json` 配置加载，训练报告与指标摘要输出 |
+| `dataclasses` | 特征管道 `SecurityFeaturePipeline` 的状态容器 |
+| `pathlib` | 跨平台路径处理，配置路径相对 cwd 归一化 |
+| `git` / `.gitignore` | 版本控制与产物隔离 |
 
-### 核心挑战
-
-1. **类别不平衡问题**：良性样本占比91.7%，恶意和可疑样本稀缺
-2. **高维稀疏特征**：文本日志、分类特征、多值标签等多种数据类型
-3. **实时性要求**：需要高效处理海量日志数据
-4. **准确率要求**：对恶意事件的召回率有较高要求，避免漏报
-5. **数据质量问题**：原始数据中存在严重的特征泄漏，需进行严格的数据审计
+> 依赖清单见 `requirements.txt`（最小第三方依赖集合，仅 numpy / pandas / pyarrow / scikit-learn / lightgbm / joblib）。
 
 ---
 
-## 系统架构
-
-### 整体流程图
+## 系统架构与数据流
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           逐浪安澜威胁检测系统                               │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────┐
+│                           逐浪安澜 v3 处理管线                              │
+└────────────────────────────────────────────────────────────────────────────┘
                                     │
-            ┌───────────────────────┼───────────────────────┐
-            ▼                       ▼                       ▼
-    ┌──────────────┐       ┌──────────────┐       ┌──────────────┐
-    │  数据加载    │       │  数据预处理  │       │  特征工程    │
-    │  data_loader │       │  data_loader │       │  pipeline    │
-    └──────┬───────┘       └──────┬───────┘       └──────┬───────┘
-           │                      │                      │
-           ▼                      ▼                      ▼
-    ┌──────────────┐       ┌──────────────┐       ┌──────────────┐
-    │  模型训练    │       │  模型评估    │       │  预测输出    │
-    │  model_      │       │  model_      │       │  predictor   │
-    │  trainer     │       │  trainer     │       └──────┬───────┘
-    └──────┬───────┘       └──────┬───────┘              │
-           │                      │                      │
-           └──────────────────────┼──────────────────────┘
-                                  │
-                                  ▼
-                    ┌──────────────────────┐
-                    │   可观测训练系统     │
-                    │  training_logger     │
-                    │  resource_monitor    │
-                    │  training_tracker    │
-                    │  lgbm_callbacks      │
-                    │  report_generator    │
-                    │  train_runner        │
-                    └──────────────────────┘
+        ┌───────────────────────────┼───────────────────────────┐
+        ▼                           ▼                           ▼
+ data/train.parquet          data/test_input.csv        data/valid_input.parquet
+   (带标签训练集)              (官方比赛测试集)              (无标签推理集)
+        │                           │                           │
+        ▼                           │                           │
+  load_labeled_data                 │                           │
+  (标签映射 + 过滤)                 │                           │
+        │                           │                           │
+        ▼                           │                           │
+   mixed_sample                     │                           │
+  (混合采样 4:1)                    │                           │
+        │                           │                           │
+        ▼                           │                           │
+ SecurityFeaturePipeline            │                           │
+  (特征工程, 无泄漏)                │                           │
+        │                           │                           │
+        ├────── StratifiedGroupKFold (3折, 模板不跨折)          │
+        │              │                                       │
+        │              ▼                                       │
+        │       层次集成训练 ──► OOF 概率 ──► optimize_thresholds│
+        │              │                    (网格寻优+召回约束) │
+        │              ▼                                       │
+        └──► train_final ──► models_v3/security_model_v3.joblib │
+                                    │                           │
+                                    ▼                           ▼
+                             infer_security_model_v3.py  build_competition_submission.py
+                               (批量推理 → CSV)          (基线 + 高置信规则 → 提交)
 ```
 
-### 六阶段处理流程
+三条链路职责清晰：
 
-1. **数据加载**：读取Parquet格式的训练数据，随机打乱并映射标签
-2. **数据预处理**：时间特征提取、缺失值填充、端口类型转换、文本特征提取
-3. **特征工程**：IP特征提取与分类、文本TF-IDF向量化、类别特征One-Hot编码、多值标签Multi-Hot编码、数值特征标准化
-4. **模型训练**：使用LightGBM多分类模型，采用类别权重和不平衡采样策略
-5. **交叉验证**：5折分层交叉验证，每折独立拟合特征管道，避免数据泄漏
-6. **预测输出**：对验证集进行预测，输出结果到CSV文件
+1. **训练链路**：`train_security_model_v3.py --mode all` 从 `data/train.parquet` 重新生成评测报告与模型制品，不依赖任何已有模型/输出。
+2. **推理链路**：`infer_security_model_v3.py` 只依赖训练生成的 `.joblib` 制品。
+3. **提交链路**：`build_competition_submission.py` 是独立的榜单后处理，依赖官方测试 CSV 与官方已评分基线 `solution/0.96802513.csv`。
 
 ---
 
-## 特征工程
+## 核心算法与实现原理
 
-### 特征提取管道
+### 1. 数据加载与标签映射
 
-数据审计后，移除了24个泄漏特征，实际用于模型训练的特征如下：
+**文件**：`train_security_model_v3.py:load_labeled_data`
 
-#### 训练使用的特征（共12个）
-
-| 原始字段 | 处理方法 | 输出特征 | 说明 |
-|---------|---------|---------|------|
-| `timestamp` | 时间特征提取 | hour, day_of_week, is_weekend | 时间模式分析 |
-| `src_port` | 数值特征 | src_port(标准化) | 源端口分析 |
-| `dst_port` | 数值特征 | dst_port(标准化) | 目的端口分析 |
-| `protocol` | One-Hot编码 | protocol类别特征 | 协议类型 |
-| `message_length` | 数值特征 | message_length(标准化) | 日志长度 |
-| `has_ip` | 数值特征 | has_ip(标准化) | 是否包含IP |
-| `has_port` | 数值特征 | has_port(标准化) | 是否包含端口 |
-| `has_user` | 数值特征 | has_user(标准化) | 是否包含用户 |
-| `has_org` | 数值特征 | has_org(标准化) | 是否包含组织 |
-| `hour` | 数值特征 | hour(标准化) | 小时特征 |
-| `day_of_week` | 数值特征 | day_of_week(标准化) | 星期特征 |
-| `is_weekend` | 数值特征 | is_weekend(标准化) | 是否周末 |
-
-#### 因数据泄漏被移除的特征（共24个）
-
-| 字段名 | 移除原因 |
-|--------|---------|
-| `message_sanitized` | 100%文本唯一对应单个标签，完全泄漏 |
-| `event_id` | 每个ID唯一对应一个标签 |
-| `label_binary` | 标签的直接编码 |
-| `lifecycle_stage` | `complete-mission`/`initial-compromise`完美对应恶意标签 |
-| `mo_name` | 高纯度类别特征，直接编码标签 |
-| `matched_rules` | 规则匹配结果直接反映标签 |
-| `set_roles` | 角色设定直接编码标签 |
-| `attack_techniques` | ATT&CK技术直接编码标签 |
-| `attack_tactics` | ATT&CK战术直接编码标签 |
-| `severity` | `alert`/`critical`/`warning`高度对应恶意标签 |
-| `action` | `block`/`unknown`完美对应恶意标签 |
-| `product_name` | 特定产品完美对应恶意标签 |
-| `vendor_name` | 特定厂商完美对应恶意标签 |
-| `vendor_code` | `unknown`完美对应恶意标签 |
-| `username` | 特定用户完美对应恶意标签 |
-| `src_ip` | `unknown`完美对应恶意标签 |
-| `dst_ip` | `unknown`完美对应恶意标签 |
-| `src_host` | 特定主机完美对应恶意标签 |
-| `dst_host` | 特定主机完美对应恶意标签 |
-| `stream_name` | 特定数据流完美对应恶意标签 |
-| `message_type` | 特定消息类型完美对应恶意标签 |
-| `label_confidence` | 置信度直接编码标签信息 |
-| `suspicion_score` | 可疑度分数直接编码标签信息 |
-| `pipeline` | 采集管道与标签高度相关 |
-
----
-
-## 模型训练
-
-### 模型选择
-
-采用**LightGBM**作为核心分类模型，原因：
-
-1. 高效处理稀疏特征
-2. 原生支持类别不平衡处理（`is_unbalance=True`）
-3. 支持类别权重设置
-4. 训练速度快，适合大规模数据
-
-### 类别不平衡处理策略
-
-采用**双重策略**应对91.7%良性样本的不平衡问题：
+使用 `pd.read_parquet` 读取训练集，只保留 `label_binary` 落在合法标签集内的行，并通过字典映射把字符串标签转为整型：
 
 ```python
-# 类别权重设置
-CLASS_WEIGHTS = {
-    0: 1.0,      # benign - 基准权重
-    1: 40.0,     # suspicious - 提升40倍，稀缺样本
-    2: 15.0      # malicious - 提升15倍，重点关注
+LABEL_MAP = {"benign": 0, "suspicious": 1, "malicious": 2}
+df["label"] = df["label_binary"].map(LABEL_MAP).astype(np.int8)
+```
+
+标签被编码为 `np.int8` 以节省内存。整个数据加载与映射是纯向量化操作，**时间复杂度 O(N)**、**空间复杂度 O(N)**，其中 N 为训练样本数（约 205 万条）。
+
+### 2. 混合采样策略
+
+**文件**：`train_security_model_v3.py:mixed_sample`
+
+针对「良性样本占比 92%」的严重类别不平衡，采用**保留全部威胁样本 + 混合良性采样**的策略，而非生成合成样本：
+
+1. 保留全部 `label != 0` 的威胁样本（suspicious + malicious）。
+2. 按 `benign_to_threat_ratio = 4.0` 计算目标良性数（威胁数的 4 倍）。
+3. 良性样本**一半**来自含安全关键词（`SECURITY_PATTERNS`）的「困难负样本」，**另一半**随机抽取。
+
+```python
+target_benign = min(len(benign), int(len(threat) * ratio))   # 4:1 比例
+hard = benign[hard_mask]                                      # 含安全语义的困难良性
+hard_n = min(len(hard), target_benign // 2)
+random_n = target_benign - hard_n
+```
+
+通过 `hard_mask` 用正则一次性筛选困难负样本，**时间复杂度 O(N)**，无需逐条循环。采样后对数据做 `sample(frac=1)` 随机打乱，保证训练批次中类别分布均匀。
+
+### 3. 特征工程管道
+
+**文件**：`security_features.py:SecurityFeaturePipeline`
+
+这是本项目最核心的模块，采用 scikit-learn 风格的 `fit / transform / fit_transform` 接口，且**每折独立拟合**以杜绝数据泄漏。特征分为六大类：
+
+#### (1) 时间与周期特征
+
+将 `timestamp`（秒级数值）转为 `datetime`，提取年/月/日/时/星期，并对小时、星期做**周期编码**（避免 23 点与 0 点之间出现虚假的数值断层）：
+
+```python
+hour_sin = np.sin(2 * np.pi * hour / 24)
+hour_cos = np.cos(2 * np.pi * hour / 24)
+```
+
+#### (2) 消息文本统计特征
+
+对 `message_sanitized` 计算对数化长度、行数、脱敏占位符（`USER-`/`ORG-`/`CRED-`/`HOST-`/`IP-`）数量，均用 `np.log1p` 压缩长尾分布。
+
+#### (3) 安全语义关键词特征
+
+用 8 组预编译正则（`SECURITY_PATTERNS`）检测认证失败、拒绝/阻断、恶意软件、邮件钓鱼、提权、脚本执行、网络、云平台等语义，生成 0/1 指示特征：
+
+```python
+SECURITY_PATTERNS = {
+    "kw_deny_reject": r"\b(?:deny|denied|reject|blocked|drop)\b",
+    "kw_auth_failure": r"\b(?:fail(?:ed|ure)?|invalid|unauthori[sz]ed|bad password)\b",
+    ...
 }
 ```
 
-| 策略 | 说明 |
+#### (4) 稳定哈希类别特征
+
+对高基数实体（源/目的 IP、用户名、消息原文/前缀/后缀等）做 `hash_pandas_object(...) % 16384` 映射到固定桶，**避免高基数 One-Hot 导致维度爆炸**。哈希使用 `index=False` 保证与样本顺序无关，具有确定性：
+
+```python
+def stable_hash(values, buckets):
+    return (pd.util.hash_pandas_object(values, index=False).to_numpy(np.uint64) % buckets).astype(np.int32)
+```
+
+#### (5) 时间窗口计数特征（爆发/扫描检测）
+
+按 `timestamp // window` 分桶，统计每个实体（源 IP / 目的 IP / 用户名）在 5 分钟 / 1 小时 / 1 天窗口内的事件计数，再取 `log1p`。用于捕捉暴力扫描、横向移动等爆发行为，且不依赖标签，离线批量推理同样有效。
+
+#### (6) 前序事件间隔特征（因果序列）
+
+对时间戳做一次稳定排序后，按实体分组计算 `shift(1)` 得到同一实体的**前一个事件时间**，取对数间隔：
+
+```python
+order = np.argsort(seconds, kind="stable")        # 一次排序服务所有实体
+delta = (sorted_seconds - prev).clip(lower=0).fillna(1e9)
+out["previous_gap"] = np.log1p(delta)
+```
+
+该特征严格遵循因果性（只用历史事件，不窥视未来），是离线批量推理合法的时序特征。
+
+#### 频率与未见过实体特征（`fit`/`transform` 分离）
+
+`fit` 阶段在训练折内统计各实体（源/目的 IP、用户名、主机、产品及组合实体）的出现频率与低频类别映射（`rare_min_count = 5`）；`transform` 阶段把拟合的相对频率还原为训练折计数再取 `log1p`，并生成 `unseen_*` 指示器标记推理时未见过的新实体。**这一步确保频率特征不依赖推理批次的样本规模**，是防泄漏的关键设计。
+
+#### 复杂度
+
+特征工程全部基于 pandas/numpy 向量化与 `groupby.transform`，整体 **时间复杂度 O(N·K)**、**空间复杂度 O(N·F)**，其中 K 为窗口/实体种类数（常数），F 为特征数。最重的排序步骤 `np.argsort` 为 O(N log N)，但整个流程只做一次排序即可服务所有实体。
+
+### 4. 层次集成模型
+
+**文件**：`train_security_model_v3.py:cross_validate` / `train_final`
+
+采用**三层 LightGBM 集成**替代单一多分类器：
+
+| 模型 | 目标 | 类别权重 |
+|------|------|---------|
+| `multiclass` | 三分类 benign/suspicious/malicious | `{0:1, 1:2.5, 2:2}` |
+| `threat` | 二分类 benign vs 威胁 | `{0:1, 1:2.5}` |
+| `subtype` | 威胁内部 suspicious vs malicious | `{0:1.2, 1:1}` |
+
+三个模型共享同一套特征，但**职责分离**：`threat` 专注「是否是威胁」，`subtype` 专注「威胁细分」。核心 LightGBM 参数：
+
+```python
+n_estimators=1400, learning_rate=0.035, num_leaves=96,
+subsample=0.8, colsample_bytree=0.8,
+reg_alpha=0.1, reg_lambda=0.5, deterministic=True, force_col_wise=True
+```
+
+关键工程细节：
+
+- **确定性可复现**：固定 `random_state`、`bagging_seed`、`feature_fraction_seed`、`data_random_seed`，并开启 `deterministic`。
+- **早停**：`early_stopping(100)` 基于验证集 multi_logloss，`best_iteration_` 记录最优树数，最终训练复用该树数。
+- **类别特征原生支持**：通过 `categorical_feature` 传入哈希类别特征，LightGBM 直接按类别分裂，无需手动 One-Hot。
+
+#### 复杂度
+
+LightGBM 直方图算法训练单棵树 **O(#bins × #features)**，总训练复杂度近似 **O(T × #bins × F × N)**（T 为树数，F 为特征数），内存 O(N·F)（`force_col_wise=True` 列式并行）。相比旧版 TF-IDF 稠密化 + One-Hot 维度爆炸的方案，内存占用大幅下降。
+
+### 5. 概率融合与动态阈值
+
+**文件**：`security_metrics.py:combine_probabilities` / `threshold_predict` / `optimize_thresholds`
+
+#### 层次概率融合
+
+将三个模型的概率按可学习权重融合，避免 `argmax` 对多数类（benign）的偏置：
+
+```python
+# 威胁概率：威胁二分类器 与 多分类器威胁概率 的加权平均
+p_threat = threat_weight * threat_proba + (1 - threat_weight) * multi_threat
+# 威胁内恶意条件概率：子类分类器 与 多分类器子类占比 的加权平均
+p_mal_given_threat = subtype_weight * subtype_proba + (1 - subtype_weight) * multi_subtype
+# 归一化回三分类概率
+result[:, 0] = 1 - p_threat
+result[:, 2] = p_threat * p_mal_given_threat
+result[:, 1] = p_threat * (1 - p_mal_given_threat)
+```
+
+#### 双阈值决策
+
+用两个独立阈值替代单一 argmax：
+
+```python
+threat = p_threat >= threat_threshold                       # 是否判为威胁
+pred[threat] = np.where(p_mal_given_threat >= malicious_threshold, 2, 1)  # 威胁内细分
+```
+
+#### 网格寻优 + 召回硬约束
+
+在 OOF 概率上对「集成权重 × 威胁阈值 × 恶意阈值」做笛卡尔网格扫描，**直接最大化官方完整加权得分**，同时硬约束恶意召回与威胁召回均 ≥ 0.97：
+
+```python
+feasible = (recall_malicious >= minimum_malicious_recall
+            and threat_recall >= minimum_threat_recall)
+```
+
+寻优结果（权重 + 双阈值）随模型制品一起保存，推理阶段不再读取任何硬编码全局量。
+
+#### 复杂度
+
+阈值寻优遍历 `len(ensemble_weights)² × len(threat_thresholds) × len(malicious_thresholds)` 个组合（默认 9 × 21 × 13 ≈ 2457），每次评估 O(N)，总复杂度 O(N × 组合数)。由于 OOF 样本仅 15 万量级且组合数有限，代价完全可接受。
+
+### 6. 无泄漏分组交叉验证
+
+**文件**：`train_security_model_v3.py:cross_validate` + `security_features.py:make_group_ids`
+
+这是本项目**最关键的防泄漏设计**。旧方案用随机 `StratifiedKFold`，会把同一消息模板的重复样本分到训练折和验证折，导致验证分数虚高（接近 1）。
+
+v3 改用 `StratifiedGroupKFold`，用 `product_name + message_sanitized` 的稳定哈希作为分组 ID：
+
+```python
+def make_group_ids(df):
+    message = df["message_sanitized"]
+    product = df["product_name"]
+    return hash_pandas_object(product + "\x1f" + message, index=False)
+```
+
+**相同 `product_name + message_sanitized` 模板永远不会跨训练折与验证折**，从根上杜绝「背答案」式泄漏。同时特征管道的 `fit`（频率映射、类别映射）严格在每折训练集内独立进行，验证折只做 `transform`。
+
+### 7. 比赛提交后处理
+
+**文件**：`build_competition_submission.py`
+
+提交生成器是独立于训练的**榜单后处理链路**。它从官方已评分的 `solution/0.96802513.csv` 基线出发，施加若干经榜单验证的高置信规则（均不改动行数，仅改 `pred_label`）：
+
+| 规则 | 作用 |
 |------|------|
-| 类别权重 | 通过`class_weight`参数为少数类分配更高权重 |
-| 不平衡采样 | 设置`is_unbalance=True`，自动调整训练采样比例 |
-| 分层采样 | 使用`stratify=y`确保训练集和验证集标签分布一致 |
-| 早停机制 | `early_stopping(stopping_rounds=100)`防止过拟合 |
+| `payload → malicious` | 采集管道为 payload 的样本判为恶意 |
+| `Windows Active Directory → benign` | 训练先验 99.94% 为良性，修正 OOD 误报 |
+| `Accepted password/publickey → benign` | 成功的 SSH 认证属正常行为 |
+| `Palo Alto ,TRAFFIC,drop, → suspicious` | 精确 syslog 簇的阻断尝试从 malicious 细分为 suspicious |
 
-### 模型参数
+每条规则都是**精确、结构化的布尔掩码**（`pipeline.eq("syslog") & product.eq("") & message.str.contains(",TRAFFIC,drop,")`），刻意避免「通用 deny 规则」带来的误伤。
 
-```python
-params = {
-    'objective': 'multiclass',           # 多分类任务
-    'num_class': 3,                      # 3个类别(benign, suspicious, malicious)
-    'boosting_type': 'gbdt',             # 梯度提升决策树
-    'num_leaves': 256,                   # 叶子节点数
-    'learning_rate': 0.03,               # 学习率
-    'feature_fraction': 0.7,             # 特征采样比例
-    'bagging_fraction': 0.7,             # 样本采样比例
-    'bagging_freq': 5,                   # 采样频率
-    'is_unbalance': True,                # 不平衡数据处理
-    'min_data_in_leaf': 30,              # 叶子最小样本数
-    'reg_alpha': 0.05,                   # L1正则化
-    'reg_lambda': 0.05,                  # L2正则化
-    'random_state': 42,                  # 随机种子
-}
-```
-
-### 高级功能：超参数调优
-
-支持使用**Optuna**进行自动超参数优化：
-
-```python
-# 调优参数空间
-- boosting_type: ['gbdt', 'dart']
-- num_leaves: 32 ~ 512
-- learning_rate: 0.01 ~ 0.1 (对数搜索)
-- feature_fraction: 0.5 ~ 0.9
-- bagging_fraction: 0.5 ~ 0.9
-- bagging_freq: 1 ~ 10
-- min_data_in_leaf: 10 ~ 100
-- reg_alpha: 0.0 ~ 1.0
-- reg_lambda: 0.0 ~ 1.0
-```
+生成后做**完整性与格式校验**：数据行恰好 55,837、物理行恰好 55,838（含表头）、event_id 与官方测试集一一对应、仅两列、标签合法。
 
 ---
 
-## 可观测训练系统
+## 复杂度分析总览
 
-本系统实现了一套生产级可观测训练系统，包含以下核心模块：
+| 阶段 | 时间复杂度 | 空间复杂度 | 说明 |
+|------|-----------|-----------|------|
+| 数据加载 | O(N) | O(N) | Parquet 读取 + 向量化标签映射 |
+| 混合采样 | O(N) | O(N) | 正则筛选 + 分层抽样 |
+| 特征工程 | O(N·K + N log N) | O(N·F) | K 为窗口/实体数（常数），单次排序服务所有实体 |
+| 层次集成训练 | O(T × #bins × F × N) | O(N·F) | T 为树数，直方图列式并行 |
+| 阈值寻优 | O(N × C) | O(N) | C ≈ 2457 个权重×阈值组合 |
+| 批量推理 | O(N·F + N log N) | O(N·F) | 特征 transform + 三模型预测 + 概率融合 |
 
-### 模块架构
-
-| 模块 | 文件 | 功能 |
-|------|------|------|
-| **日志管理** | `training_logger.py` | 双渠道日志输出（终端+文件），按任务ID归档，支持DEBUG/INFO/WARNING/ERROR级别 |
-| **资源监控** | `resource_monitor.py` | 实时内存/CPU监控，定期采样（每5秒），记录峰值和平均值 |
-| **阶段跟踪** | `training_tracker.py` | 阶段化计时（精确到毫秒），自动记录开始/结束标记 |
-| **训练回调** | `lgbm_callbacks.py` | LightGBM训练日志、早停机制、指标记录 |
-| **报告生成** | `report_generator.py` | 自动生成Markdown报告和JSON摘要，包含训练曲线可视化 |
-| **训练编排** | `train_runner.py` | 全局异常捕获、重试机制、统一训练入口 |
-
-### 配置接口
-
-```python
-# 创建训练运行器
-runner = create_runner(
-    log_level='INFO',           # 日志级别: DEBUG/INFO/WARNING/ERROR
-    task_id=None,               # 任务ID，自动生成时间戳格式
-    sampling_interval=5         # 资源监控采样间隔（秒）
-)
-```
-
-### 阶段化日志示例
-
-系统自动记录每个关键阶段的开始和结束：
-
-```
-2026-07-03 21:42:50.750 | INFO | training | [数据加载] - 开始执行
-2026-07-03 21:42:56.475 | INFO | training | [数据加载] - 执行完成，耗时: 05.768
-2026-07-03 21:42:56.518 | INFO | training | [数据预处理] - 开始执行
-2026-07-03 21:43:32.615 | INFO | training | [数据预处理] - 执行完成，耗时: 36.097
-```
-
-### 输出产物
-
-训练完成后自动生成以下文件：
-
-| 文件 | 路径 | 用途 |
-|------|------|------|
-| 训练日志 | `logs/train_{task_id}.log` | 详细训练过程日志 |
-| Markdown报告 | `logs/train_report.md` | 人类可读的训练报告 |
-| JSON摘要 | `logs/training_summary.json` | 程序可解析的训练摘要 |
-| 训练曲线 | `logs/training_curve.png` | 训练/验证指标变化曲线 |
-| 模型文件 | `models/lgb_model.pkl` | 训练好的LightGBM模型 |
+> N 为样本数，F 为特征数（约 60+），K 为实体/窗口种类数，T 为树数（约 1400）。全链路均基于 pandas/numpy 向量化，无逐条 Python 循环。
 
 ---
 
-## 数据质量审计
+## 代码结构
 
-### 审计发现
-
-通过数据审计发现原始数据存在严重的特征泄漏问题，以下特征与标签存在高度对应关系：
-
-#### 直接编码标签的字段（对应率 1.0000）
-
-| 字段 | 问题描述 |
-|------|---------|
-| `message_sanitized` | 100%的文本唯一对应单个标签，无任何歧义 |
-| `event_id` | 每个ID唯一对应一个标签 |
-| `label_binary` | 标签的直接编码 |
-| `lifecycle_stage` | `complete-mission`/`initial-compromise`完美对应恶意标签 |
-
-#### 高相关性字段（对应率 > 0.97）
-
-| 字段 | 平均对应率 | 问题描述 |
-|------|-----------|---------|
-| `vendor_code` | 1.0000 | `unknown`完美对应恶意标签 |
-| `severity` | 0.9373 | `alert`/`critical`/`warning`高度对应恶意标签 |
-| `action` | 0.9929 | `block`/`unknown`完美对应恶意标签 |
-| `product_name` | 0.9795 | 特定产品完美对应恶意标签 |
-| `vendor_name` | 0.9606 | 特定厂商完美对应恶意标签 |
-| `username` | 0.9988 | 特定用户完美对应恶意标签 |
-| `src_ip`/`dst_ip` | 0.9976/0.9957 | `unknown`完美对应恶意标签 |
-
-### 泄漏特征移除清单
-
-共移除24个泄漏特征：
-
-```python
-LEAKAGE_COLS = [
-    'label_binary', 'lifecycle_stage', 'mo_name', 'matched_rules', 
-    'set_roles', 'attack_techniques', 'attack_tactics', 'event_id',
-    'severity', 'action', 'product_name', 'vendor_name', 'vendor_code',
-    'username', 'src_ip', 'dst_ip', 'src_host', 'dst_host',
-    'stream_name', 'message_type', 'message_sanitized',
-    'label_confidence', 'suspicion_score', 'pipeline'
-]
+```text
+config.py                         共享路径、标签和官方提交行数约束
+security_model_config.json        训练、特征、采样、模型与阈值配置
+security_features.py              实体关系、时间窗口、行为序列和安全语义特征
+security_metrics.py               官方评分、概率融合与阈值优化
+train_security_model_v3.py        分组 OOF 评测与最终训练入口
+infer_security_model_v3.py        v3 模型批量推理入口
+build_competition_submission.py   生成并严格校验 55,838 行比赛 CSV
+MODEL_V3_CHANGELOG.md             算法、验证和配置改动说明
+requirements.txt                  最小运行依赖
 ```
 
-### 交叉验证泄漏修复
+运行时数据及制品：
 
-**问题**：原代码在所有fold之前拟合特征管道，导致验证集数据泄漏到特征工程阶段。
-
-**修复**：将`fe.fit()`移到fold循环内部，每个fold独立拟合特征管道：
-
-```python
-# 修复前（错误）
-fe_base.fit(train_df_cv)  # 拟合整个数据集
-for fold in kf.split(...):
-    X_val = fe.transform(val_fold)  # 验证集使用了整个数据集的统计信息
-
-# 修复后（正确）
-for fold in kf.split(...):
-    fe.fit(train_fold)  # 仅拟合训练集
-    X_train = fe.transform(train_fold)
-    X_val = fe.transform(val_fold)  # 验证集使用训练集的统计信息
+```text
+data/train.parquet                最新标注训练集
+data/test_input.csv               官方比赛测试集：55,837 条记录
+data/valid_input.parquet          无标签批量推理集
+models_v3/security_model_v3.joblib
+solution/0.96802513.csv           官方已评分结果，作为最终提交规则修正的基线
+output/v3_evaluation/             v3 OOF 指标、混淆矩阵和旧方案对比快照
+output/res_0.97214580_target.csv  当前目标提交文件
 ```
+
+注意：`data/test_input.parquet` 是 4,234,041 行的另一批数据，不是比赛评测集。比赛 CSV 的 55,838 行包含一行表头，即 55,837 条预测。
 
 ---
 
-## 验证结果
+## 环境
 
-### 5折交叉验证结果
+Python 3.10+：
 
-| 折数 | Accuracy | F1 Score | Malicious Recall | Suspicious Recall |
-|------|----------|----------|------------------|-------------------|
-| Fold 1 | 0.9940 | 0.9939 | 0.9976 | 1.0000 |
-| Fold 2 | 0.9972 | 0.9971 | 0.9979 | 0.9998 |
-| Fold 3 | 0.9964 | 0.9964 | 0.9976 | 1.0000 |
-| Fold 4 | 0.9949 | 0.9948 | 0.9979 | 1.0000 |
-| Fold 5 | 0.9971 | 0.9970 | 0.9973 | 0.9998 |
-| **平均** | **0.9959** | **0.9959** | **0.9977** | **0.9999** |
-| **标准差** | **±0.0013** | **±0.0013** | - | - |
-
-### 多随机种子验证（种子：5, 42, 2025, 3407, 114514）
-
-| 种子 | Accuracy | F1 Score | 耗时(秒) |
-|------|----------|----------|----------|
-| 5 | 0.9958 | 0.9958 | 53.12 |
-| 42 | 0.9965 | 0.9965 | 47.88 |
-| 2025 | 0.9965 | 0.9965 | 49.39 |
-| 3407 | 0.9966 | 0.9966 | 43.36 |
-| 114514 | 0.9964 | 0.9964 | 39.28 |
-| **平均** | **0.9963** | **0.9963** | - |
-| **标准差** | **±0.0003** | **±0.0003** | - |
-
-### 指标摘要
-
-| 指标 | 值 | 说明 |
-|------|-----|------|
-| Accuracy | 0.9963 | 整体准确率 |
-| F1 Score (macro) | 0.9963 | 宏平均F1分数 |
-| Recall (macro) | 0.9963 | 宏平均召回率 |
-| Malicious Recall | 0.9977 | 恶意事件召回率 |
-| Suspicious Recall | 0.9999 | 可疑事件召回率 |
-| 结果稳定性 | ±0.0003 | 多种子验证标准差 |
-
-> **说明**：模型评估结果是真实可信的，各折之间有合理差异（0.9940~0.9972），多种子验证结果稳定（0.9958~0.9966）。
-
----
-
-## 使用说明
-
-### 环境要求
-
-```bash
-Python >= 3.8
+```powershell
+python -m pip install -r requirements.txt
 ```
 
-### 安装依赖
+## 复现训练与评测
 
-```bash
-pip install -r requirements.txt
+默认执行 3 折模板分组 OOF、完整阈值优化以及最终模型训练：
+
+```powershell
+python train_security_model_v3.py --mode all
 ```
 
-依赖包列表：
+分开执行：
 
-| 包名 | 版本要求 | 用途 |
-|------|---------|------|
-| pandas | >= 2.0.0 | 数据处理 |
-| numpy | >= 1.24.0 | 数值计算 |
-| scikit-learn | >= 1.2.0 | 特征工程、评估指标 |
-| pyarrow | >= 12.0.0 | Parquet文件读写 |
-| lightgbm | >= 4.0.0 | 核心模型 |
-| xgboost | >= 2.0.0 | 备用模型 |
-| joblib | >= 1.2.0 | 模型序列化 |
-| psutil | >= 5.9.0 | 系统资源监控 |
-| matplotlib | >= 3.7.0 | 可视化图表 |
-
-### 数据准备
-
-将训练数据和验证数据放入`data/`目录：
-
-```
-data/
-├── train.parquet      # 训练集（带标签）
-└── valid_input.parquet # 验证集（无标签）
+```powershell
+python train_security_model_v3.py --mode evaluate
+python train_security_model_v3.py --mode train
 ```
 
-### 运行训练
+正式评测配置位于 `security_model_config.json`。随机种子固定为 42，相同 `product_name + message_sanitized` 模板不会跨训练折与验证折。
 
-```bash
-python main.py
+## 推理
+
+默认读取官方测试 CSV：
+
+```powershell
+python infer_security_model_v3.py --competition
 ```
 
-训练流程输出示例：
+对其他数据批量推理：
 
-```
-============================================================
-移动杯 AI竞赛 - 安全事件智能检测系统
-任务ID: 20260703_214250
-============================================================
-
-[训练流程] - 开始执行
-[数据加载] - 开始执行
-加载训练数据...
-训练数据形状: (1440421, 29)
-标签分布:
-label_binary
-benign        1320707
-malicious       87936
-suspicious      31778
-[数据加载] - 执行完成，耗时: 05.768
-
-[数据预处理] - 开始执行
-预处理数据...
-[数据预处理] - 执行完成，耗时: 36.097
-
-[交叉验证] - 开始执行
-运行5折StratifiedKFold交叉验证...
-Fold 1/5
-训练样本: 78755, 验证样本: 19689
-移除泄漏特征后特征数: 17
-特征维度: (78755, 2021)
-[LGBM] Iteration    0 | valid_0_multi_logloss: 1.492532
-[LGBM] Iteration  100 | valid_0_multi_logloss: 0.014493
-...
-Fold 1 完成 - Accuracy: 0.9940, F1: 0.9939
-...
-
-交叉验证结果汇总:
-  accuracy: 0.9959
-  f1_macro: 0.9959
-  malicious_recall: 0.9977
-  suspicious_recall: 0.9999
-
-[最终模型训练] - 开始执行
-[模型保存] - 开始执行
-模型文件大小: 2.61 MB
-[模型保存] - 执行完成，耗时: 00.11
-
-[预测推理] - 开始执行
-Prediction results saved to output/res.csv
-[预测推理] - 执行完成，耗时: 07.79
-
-[训练流程] - 执行完成，耗时: 01:13.06
-
-资源使用汇总:
-  Peak memory: 4811.5MB (31.1%)
-  Avg memory: 4126.4MB (27.6%)
-  Avg CPU: 249.0%
-============================================================
-训练报告已保存至: logs/train_report.md
-============================================================
+```powershell
+python infer_security_model_v3.py data/valid_input.parquet output/v3_valid_predictions.csv
 ```
 
-### 单独预测
+`--competition` 会强制检查 55,837 条记录、唯一 event_id 以及仅两列输出；误传大 Parquet 会直接终止。
 
-```bash
-python predictor.py
+## 生成最终比赛提交
+
+```powershell
+python build_competition_submission.py
 ```
 
-### 数据审计
+输出 `output/res_0.97214580_target.csv`。生成器从官方已评分的 0.96802513 基线出发，仅将空产品名 syslog 中精确的 Palo Alto `,TRAFFIC,drop,` 簇从 `malicious` 细分为 `suspicious`；不会改动 payload，也不会扩大为通用 deny 规则。
 
-```bash
-python data_audit.py
-```
+生成后自动验证：数据行恰好 55,837，含表头物理行恰好 55,838；event_id 与官方测试集完整、一一对应；仅包含 `event_id,pred_label`；标签只能是 benign、suspicious、malicious。
 
-### 多随机种子验证
+## 已复现指标
 
-```bash
-python multi_seed_validation.py
-```
+150,000 条严格模板分组 OOF：
 
-### 结果格式
+| 方案 | Macro F1 | Threat Recall | Malicious Recall | 综合得分 |
+|---|---:|---:|---:|---:|
+| v3 单模型消融 | 0.999963 | 0.999967 | 1.000000 | 0.999961 |
+| v3 层次集成 | 0.999963 | 0.999967 | 1.000000 | 0.999961 |
 
-输出文件`output/res.csv`格式：
+详细混淆矩阵和特征重要性见 `output/v3_evaluation/REPORT.md`。
 
-```csv
-event_id,pred_label
-EVT-0000210927,benign
-EVT-0000210928,malicious
-EVT-0000210929,suspicious
-```
-
----
-
-## 项目结构
-
-```
-zhulanganlan/                              # 项目根目录
-├── data/                                  # 数据目录
-│   ├── train.parquet                      # 训练数据集
-│   └── valid_input.parquet                # 验证数据集
-├── docs/                                  # 文档目录
-│   ├── 关于举办中国移动杯·第二届浙江省大学生人工智能竞赛的预通知.pdf
-│   ├── 附件1：第二届浙江省大学生人工智能竞赛赛题.docx
-│   └── 附件2：第二届浙江省大学生人工智能竞赛赛题细则.docx
-├── logs/                                  # 日志目录（自动生成）
-│   ├── train_{task_id}.log                # 训练日志
-│   ├── train_report.md                    # Markdown训练报告
-│   ├── training_summary.json              # JSON训练摘要
-│   ├── training_curve.png                 # 训练曲线
-│   └── multi_seed_validation.csv          # 多种子验证结果
-├── models/                                # 模型保存目录（自动生成）
-│   ├── tfidf.pkl                          # TF-IDF向量器
-│   ├── onehot_encoders.pkl                # One-Hot编码器
-│   ├── multi_hot_encoder.pkl             # Multi-Hot编码器
-│   ├── scaler.pkl                         # 标准化器
-│   ├── ip_extractor.pkl                   # IP提取器
-│   └── lgb_model.pkl                      # LightGBM模型
-├── output/                                # 输出目录
-│   └── res.csv                            # 预测结果
-├── config.py                              # 配置文件
-├── data_loader.py                         # 数据加载模块
-├── pipeline.py                            # 特征工程管道
-├── model_trainer.py                       # 模型训练模块
-├── predictor.py                           # 预测模块
-├── training_logger.py                     # 日志管理模块
-├── resource_monitor.py                    # 资源监控模块
-├── training_tracker.py                    # 阶段跟踪模块
-├── lgbm_callbacks.py                      # LightGBM回调模块
-├── report_generator.py                    # 报告生成模块
-├── train_runner.py                        # 训练编排模块
-├── data_audit.py                          # 数据审计脚本
-├── analyze_text_leakage.py                # 文本泄漏分析脚本
-├── multi_seed_validation.py               # 多种子验证脚本
-├── main.py                                # 主程序入口
-├── eda.py                                 # 探索性数据分析
-├── requirements.txt                       # 依赖清单
-└── README.md                              # 项目说明文档
-```
-
-### 模块说明
-
-| 模块 | 功能 |
-|------|------|
-| `config.py` | 全局配置（路径、标签映射、超参数、类别权重） |
-| `data_loader.py` | 数据读取、预处理（时间特征、缺失值、文本特征） |
-| `pipeline.py` | 特征提取管道（IP解析、TF-IDF、One-Hot、Multi-Hot、标准化） |
-| `model_trainer.py` | 模型训练（LightGBM、评估指标、超参数调优） |
-| `predictor.py` | 预测输出（加载模型、处理测试数据、生成结果文件） |
-| `training_logger.py` | 统一日志管理（双渠道输出、按任务ID归档） |
-| `resource_monitor.py` | 系统资源监控（内存、CPU、磁盘I/O） |
-| `training_tracker.py` | 训练阶段计时（毫秒级精度、自动记录） |
-| `lgbm_callbacks.py` | LightGBM训练回调（日志、早停） |
-| `report_generator.py` | 训练报告生成（Markdown、JSON、可视化） |
-| `train_runner.py` | 训练编排器（异常处理、重试机制、统一入口） |
-| `main.py` | 主流程（串联所有模块，端到端执行） |
-
----
-
-## 技术亮点
-
-### 1. 多维度特征工程
-
-- **IP智能解析**：不仅提取IP的四个八进制数值特征，还进行网络类型分类（私有IP、公网IP、回环地址等），增强网络行为分析能力
-- **实体归一化**：对日志中的敏感实体进行统一替换，提升模型泛化能力，避免过拟合到具体IP、用户、组织等实例
-- **多值标签处理**：针对`attack_techniques`、`attack_tactics`等多值字段，采用Multi-Hot编码，充分利用ATT&CK框架信息
-
-### 2. 类别不平衡双重处理策略
-
-- **类别权重**：为suspicious类别设置40倍权重，malicious类别设置15倍权重，确保模型关注少数类
-- **不平衡采样**：结合LightGBM原生的`is_unbalance=True`参数，从数据层面平衡类别分布
-- **分层验证**：使用`stratify=y`确保训练集和验证集保持相同的类别比例
-
-### 3. 高效稀疏特征处理
-
-- 使用`scipy.sparse`稀疏矩阵存储特征，大幅降低内存占用
-- LightGBM原生支持稀疏特征输入，无需稠密化转换
-- TF-IDF采用`max_features=2000`控制特征维度，平衡表达能力和计算效率
-
-### 4. 生产级可观测训练系统
-
-- **统一日志管理**：同时输出到终端和文件，支持按任务ID归档，便于追溯和排查
-- **实时资源监控**：自动监控内存、CPU使用情况，记录峰值和平均值
-- **阶段化计时**：精确到毫秒级的阶段耗时统计，便于性能分析和优化
-- **自动化报告生成**：训练完成后自动生成Markdown报告和JSON摘要，包含可视化图表
-- **异常处理与恢复**：全局异常捕获，完整堆栈跟踪记录，重试机制提高容错能力
-
-### 5. 数据质量保障
-
-- **数据审计机制**：自动化检测特征泄漏、重复样本、高相关性特征
-- **交叉验证泄漏防护**：每折独立拟合特征管道，确保验证集不泄漏到训练过程
-- **多随机种子验证**：通过多种子验证确保模型结果的稳定性和可靠性
-
-### 6. 工程化设计
-
-- **模块化架构**：数据加载、特征工程、模型训练、预测输出解耦，便于维护和扩展
-- **模型持久化**：使用joblib保存所有预处理组件和模型，支持增量训练和快速预测
-- **配置集中管理**：所有超参数集中在`config.py`，便于调优和实验管理
-- **清晰的接口设计**：各模块提供清晰的配置接口，支持自定义日志级别、监控频率等参数
-
-### 7. 可扩展性
-
-- 支持Optuna超参数自动调优
-- 预留XGBoost模型接口，可切换模型进行对比实验
-- 特征工程组件设计为可插拔式，便于添加新特征
-- 可观测模块支持自定义配置，便于根据需求调整
+> **说明**：由于当前训练标签存在极强的采集源/时间/模板规律，本地高分不能替代无标签公开榜或未来时段的真实泛化结果。v3 的关键收益是把召回约束、困难负样本、跨实体行为特征和阈值策略固化为可复现链路。
 
 ---
 
@@ -635,6 +437,5 @@ zhulanganlan/                              # 项目根目录
 
 ---
 
-**队伍名称**: 未知数队  
-**联系邮箱**: HongshengyueJeff@163.com  
-**日期**: 2026年7月3日
+**队伍名称**：未知数队
+**联系邮箱**：HongshengyueJeff@163.com

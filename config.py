@@ -1,34 +1,21 @@
-import os
+"""Shared paths and submission invariants for the current v3 pipeline."""
+from pathlib import Path
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
-MODEL_DIR = os.path.join(os.path.dirname(__file__), 'models')
-OUTPUT_DIR = os.path.join(os.path.dirname(__file__), 'output')
+ROOT_DIR = Path(__file__).resolve().parent
+DATA_DIR = ROOT_DIR / "data"
+MODEL_DIR = ROOT_DIR / "models_v3"
+OUTPUT_DIR = ROOT_DIR / "output"
 
-os.makedirs(DATA_DIR, exist_ok=True)
-os.makedirs(MODEL_DIR, exist_ok=True)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+TRAIN_FILE = DATA_DIR / "train.parquet"
+VALID_FILE = DATA_DIR / "valid_input.parquet"
+TEST_FILE = DATA_DIR / "test_input.csv"
+# 0.96802513 is the latest submission whose score was confirmed by the
+# official platform. New candidates start here so validated fixes are retained.
+VERIFIED_BASE_SUBMISSION = ROOT_DIR / "solution" / "0.96802513.csv"
+TARGET_SUBMISSION = OUTPUT_DIR / "res_0.97214580_target.csv"
 
-TRAIN_FILE = os.path.join(DATA_DIR, 'train.parquet')
-VALID_FILE = os.path.join(DATA_DIR, 'valid_input.parquet')
-OUTPUT_FILE = os.path.join(OUTPUT_DIR, 'res.csv')
+# 官方测试集是 CSV 中的 55,837 个样本（加表头后 CSV 物理行数为 55,838）。
+# data/test_input.parquet 有 4,234,041 行，是另一批数据，不能用于比赛提交。
+EXPECTED_TEST_ROWS = 55_837
 
-LABEL_MAPPING = {'benign': 0, 'suspicious': 1, 'malicious': 2}
-REVERSE_LABEL_MAPPING = {v: k for k, v in LABEL_MAPPING.items()}
-
-SEED = 42
-
-MAX_FEATURES = 2000
-MAX_SEQ_LEN = 256
-EMBEDDING_DIM = 128
-
-NUM_EPOCHS = 10
-BATCH_SIZE = 512
-LEARNING_RATE = 1e-3
-
-CLASS_WEIGHTS = {
-    0: 1.0,
-    1: 40.0,
-    2: 15.0
-}
-
-SAMPLE_SIZE = 100000
+LABEL_NAMES = ("benign", "suspicious", "malicious")

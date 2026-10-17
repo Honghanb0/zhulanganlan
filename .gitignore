@@ -1,100 +1,61 @@
-### Python ###
+# ===== Python =====
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
 *.egg-info/
-.dist/
-.build/
-*.whl
+.installed.cfg
 *.egg
-MANIFEST
 
-### Virtual Environment ###
-venv/
+# 虚拟环境
 .venv/
+venv/
 env/
 ENV/
-env.bak/
-venv.bak/
 
-### IDE ###
+# ===== 运行产物（训练/推理/日志）=====
+logs/
+logs-new/
+*.log
+
+# 训练生成的模型制品（可由 train_security_model_v3.py 重新生成）
+models/
+models_v3/
+output/
+solution/*.csv
+
+# ===== 大型数据与历史快照 =====
+# 大 Parquet/CSV 数据与历史实验快照不入库
+data/*.parquet
+data/*.csv
+*.parquet
+*.pkl
+*.joblib
+10.15,22.00/
+算法2 测试集及结果提交说明/
+_tmp_map_audit.py
+
+# ===== IDE / 编辑器 =====
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+
+# ===== 系统 =====
 .DS_Store
 Thumbs.db
-Thumbs.db:encryptable
-ehthumbs.db
-ehthumbs_vista.db
-
-### Jupyter Notebook ###
-.ipynb_checkpoints/
-*.ipynb
-
-### Logs ###
-logs/
-*.log
-*.log.*
-training_log.txt
-train_log.txt
-
-### Models ###
-models/
-*.pkl
-*.joblib
-*.h5
-*.pt
-*.pth
-*.onnx
-
-### Output ###
-output/
-*.csv
-*.parquet
-
-### Dataset ###
-data/
-*.csv
-*.parquet
-*.pkl
-*.hdf5
-*.txt
-*.zip
-*.tar.gz
-*.rar
-
-### OS Files ###
-Desktop.ini
-$RECYCLE.BIN/
-*.tmp
-*.temp
-
-### LightGBM/XGBoost ###
-*.lgb
-*.bst
-
-### Matplotlib ###
-*.png
-*.jpg
-*.jpeg
-*.svg
-*.pdf
-
-### Configuration ###
-.env
-.env.local
-.env.*.local
-
-### Testing ###
-.pytest_cache/
-.coverage
-htmlcov/
-.pytest/
-
-### Build ###
-build/
-dist/
+desktop.ini
