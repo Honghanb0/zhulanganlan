@@ -142,6 +142,9 @@ def cross_validate(df: pd.DataFrame, config: dict) -> tuple[dict, dict]:
             hash_buckets=config["features"]["hash_buckets"],
             rare_min_count=config["features"]["rare_min_count"],
             window_seconds=tuple(config["features"]["window_seconds"]),
+            include_absolute_calendar_features=config["features"].get(
+                "include_absolute_calendar_features", True
+            ),
         )
         x_train = fe.fit_transform(train_df)
         x_val = fe.transform(val_df)
@@ -179,7 +182,10 @@ def cross_validate(df: pd.DataFrame, config: dict) -> tuple[dict, dict]:
     importance = (importance / max(importance.sum(), 1)).head(40)
     result = {
         "validation": {
-            "strategy": "StratifiedGroupKFold; exact product+message templates never cross folds",
+            "strategy": "StratifiedGroupKFold; identical message_sanitized values, including empty values, never cross folds",
+            "scope": "mixed-sample, exact-message-grouped in-distribution OOF; not an official-score estimate or temporal/source holdout",
+            "score_objective": "project-local proxy in security_metrics.py; official scoring formula is not available in this repository",
+            "absolute_calendar_features": config["features"].get("include_absolute_calendar_features", True),
             "folds": folds,
             "rows": len(df),
             "class_distribution": df.label_binary.value_counts().to_dict(),
@@ -205,6 +211,9 @@ def train_final(df: pd.DataFrame, config: dict, evaluation: dict) -> Path:
         hash_buckets=config["features"]["hash_buckets"],
         rare_min_count=config["features"]["rare_min_count"],
         window_seconds=tuple(config["features"]["window_seconds"]),
+        include_absolute_calendar_features=config["features"].get(
+            "include_absolute_calendar_features", True
+        ),
     )
     x = fe.fit_transform(df)
     y = df.label.to_numpy(dtype=np.int8)
@@ -252,19 +261,20 @@ def save_report(evaluation: dict, config: dict, sampled: pd.DataFrame) -> Path:
         "## 可复现设置", "",
         f"- 数据：`{config['paths']['train']}`，混合采样后 {len(sampled):,} 行，随机种子 {config['seed']}。",
         f"- 验证：{evaluation['validation']['strategy']}。",
+        f"- 绝对年月日特征：{'启用' if evaluation['validation']['absolute_calendar_features'] else '关闭'}。",
         "- 基线：v3 特征上的单个多分类 LightGBM + argmax；完整版：威胁二分类/威胁子类/多分类三级集成。", "",
         "## 指标对比", "",
-        "| 方案 | Precision(macro) | Recall(macro) | F1(macro) | AUC-OVR | Threat Recall | Malicious Recall | 综合得分 |",
+        "| 方案 | Precision(macro) | Recall(macro) | F1(macro) | AUC-OVR | Threat Recall | Malicious Recall | 本地代理分 |",
         "|---|---:|---:|---:|---:|---:|---:|---:|",
-        f"| v3 单模型消融 | {base['precision_macro']:.6f} | {base['recall_macro']:.6f} | {base['f1_macro']:.6f} | {base.get('auc_ovr_macro') or 0:.6f} | {base['threat_recall']:.6f} | {base['recall_malicious']:.6f} | {base['competition_score']:.6f} |",
-        f"| v3 层次集成 | {new['precision_macro']:.6f} | {new['recall_macro']:.6f} | {new['f1_macro']:.6f} | {new.get('auc_ovr_macro') or 0:.6f} | {new['threat_recall']:.6f} | {new['recall_malicious']:.6f} | **{new['competition_score']:.6f}** |",
+        f"| v3 单模型消融 | {base['precision_macro']:.6f} | {base['recall_macro']:.6f} | {base['f1_macro']:.6f} | {base.get('auc_ovr_macro') or 0:.6f} | {base['threat_recall']:.6f} | {base['recall_malicious']:.6f} | {base['local_proxy_score']:.6f} |",
+        f"| v3 层次集成 | {new['precision_macro']:.6f} | {new['recall_macro']:.6f} | {new['f1_macro']:.6f} | {new.get('auc_ovr_macro') or 0:.6f} | {new['threat_recall']:.6f} | {new['recall_malicious']:.6f} | **{new['local_proxy_score']:.6f}** |",
         "", "## 混淆矩阵", "", "行是真实类别，列是预测类别，顺序均为 benign / suspicious / malicious。", "",
         "### v3 单模型消融", "", "| | benign | suspicious | malicious |", "|---|---:|---:|---:|",
         *[f"| {LABEL_NAMES[i]} | {cm_base[i][0]} | {cm_base[i][1]} | {cm_base[i][2]} |" for i in range(3)],
         "", "### v3 层次集成", "", "| | benign | suspicious | malicious |", "|---|---:|---:|---:|",
         *[f"| {LABEL_NAMES[i]} | {cm_new[i][0]} | {cm_new[i][1]} | {cm_new[i][2]} |" for i in range(3)],
         "", "## 阈值依据", "",
-        f"官方完整加权得分网格寻优：threat_threshold={policy['threat_threshold']}, malicious_threshold={policy['malicious_threshold']}，",
+        f"本地代理目标网格寻优（不是官方评分公式）：threat_threshold={policy['threat_threshold']}, malicious_threshold={policy['malicious_threshold']}，",
         f"同时约束 threat recall ≥ {config['threshold_search']['minimum_threat_recall']}、malicious recall ≥ {config['threshold_search']['minimum_malicious_recall']}。",
         "", "## 重要特征（gain 归一化 Top 20）", "",
         "| 特征 | 重要性 |", "|---|---:|",
@@ -281,12 +291,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", choices=["evaluate", "train", "all"], default="all")
     parser.add_argument("--max-rows", type=int, default=None,
                         help="Override evaluation sample cap; final training still uses configured mixed sample")
+    parser.add_argument("--model-dir", default=None,
+                        help="Override model output directory to preserve existing model artifacts")
+    parser.add_argument("--report-dir", default=None,
+                        help="Override evaluation report directory to keep experiment results separate")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     config = load_config(args.config)
+    config_root = Path(args.config).resolve().parent
+    for key, override in (("model_dir", args.model_dir), ("report_dir", args.report_dir)):
+        if override:
+            output_path = Path(override)
+            if not output_path.is_absolute():
+                output_path = config_root / output_path
+            config["paths"][key] = str(output_path.resolve())
     set_reproducible(config["seed"])
     df = load_labeled_data(config["paths"]["train"])
     configured_cap = config["validation"]["max_rows"]

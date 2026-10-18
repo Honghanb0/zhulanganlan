@@ -41,10 +41,9 @@ def stable_hash(values: pd.Series, buckets: int) -> np.ndarray:
 
 
 def make_group_ids(df: pd.DataFrame) -> np.ndarray:
-    """Keep exact repeated event templates in one validation fold."""
+    """Keep identical message features, including empty messages, in one fold."""
     message = _series(df, "message_sanitized")
-    product = _series(df, "product_name")
-    return pd.util.hash_pandas_object(product + "\x1f" + message, index=False).to_numpy(dtype=np.uint64)
+    return pd.util.hash_pandas_object(message, index=False).to_numpy(dtype=np.uint64)
 
 
 @dataclass
@@ -52,6 +51,7 @@ class SecurityFeaturePipeline:
     hash_buckets: int = 16384
     rare_min_count: int = 5
     window_seconds: tuple[int, ...] = (300, 3600, 86400)
+    include_absolute_calendar_features: bool = True
     category_maps_: dict = field(default_factory=dict)
     frequency_maps_: dict = field(default_factory=dict)
     feature_names_: list[str] = field(default_factory=list)
@@ -79,9 +79,10 @@ class SecurityFeaturePipeline:
         hour = dt.dt.hour.fillna(-1).astype(np.float32)
         dow = dt.dt.dayofweek.fillna(-1).astype(np.float32)
         out = pd.DataFrame(index=df.index)
-        out["timestamp_year"] = dt.dt.year.fillna(-1).astype(np.float32)
-        out["timestamp_month"] = dt.dt.month.fillna(-1).astype(np.float32)
-        out["timestamp_day"] = dt.dt.day.fillna(-1).astype(np.float32)
+        if self.include_absolute_calendar_features:
+            out["timestamp_year"] = dt.dt.year.fillna(-1).astype(np.float32)
+            out["timestamp_month"] = dt.dt.month.fillna(-1).astype(np.float32)
+            out["timestamp_day"] = dt.dt.day.fillna(-1).astype(np.float32)
         out["timestamp_hour"] = hour
         out["timestamp_dow"] = dow
         out["hour_sin"] = np.sin(2 * np.pi * hour / 24).astype(np.float32)

@@ -5,9 +5,11 @@ lines including the header.  The similarly named Parquet file is not the
 competition test set and is deliberately rejected.
 
 The default base is the best officially scored submission in ``solution``.
-The only new correction is a tightly scoped Palo Alto ``TRAFFIC,drop`` subtype
-rule. It keeps those records in the threat class and changes only their threat
-subtype from ``malicious`` to ``suspicious``.
+By default, no unscored post-processing is applied, reproducing the verified
+0.96802513 artifact. Experimental SQL Server and structured OOD rules remain
+available only through explicit flags. The combined experimental policy scored
+0.96693767, below the untouched verified baseline, so training-set template
+purity alone is not treated as evidence of test-label correctness.
 """
 from __future__ import annotations
 
@@ -61,8 +63,14 @@ def load_base_predictions(path: str, official: pd.DataFrame) -> pd.DataFrame:
     return official[["event_id"]].merge(base, on="event_id", how="left", validate="one_to_one")
 
 
-def apply_high_confidence_rules(events: pd.DataFrame, submission: pd.DataFrame) -> dict[str, int]:
-    """Apply leaderboard-validated rules without changing row cardinality."""
+def apply_high_confidence_rules(
+    events: pd.DataFrame,
+    submission: pd.DataFrame,
+    *,
+    enable_mssql_success: bool = False,
+    enable_structured_ood_fixes: bool = False,
+) -> dict[str, int]:
+    """Apply validated baseline fixes and any explicitly enabled experiments."""
     message = events.message_sanitized.fillna("").astype(str)
     product = events.product_name.fillna("").astype(str)
     pipeline = events.pipeline.fillna("").astype(str)
@@ -91,20 +99,142 @@ def apply_high_confidence_rules(events: pd.DataFrame, submission: pd.DataFrame) 
     stats["ssh_success_to_benign"] = int(ssh_change.sum())
     submission.loc[ssh_success, "pred_label"] = "benign"
 
-    # Palo Alto geo-block traffic records form one coherent syslog cluster.
-    # They are blocked connection attempts, so they remain threats, but are
-    # suspicious policy-enforcement events rather than confirmed compromises.
-    # Structural guards deliberately avoid the failed broad deny rule and the
-    # two payload records that only contain similar text.
+    # Do not rewrite the Palo Alto ``TRAFFIC,drop`` OOD cluster.  A previous
+    # 677-row malicious -> suspicious rewrite scored 0.96200413, versus
+    # 0.96802513 for the untouched verified base.  Keep this diagnostic count
+    # so accidental reintroduction is visible in build logs.
     palo_alto_traffic_drop = (
         pipeline.eq("syslog")
         & product.eq("")
         & message.str.contains(",TRAFFIC,drop,", case=False, regex=False, na=False)
     )
-    traffic_drop_change = palo_alto_traffic_drop & submission.pred_label.eq("malicious")
-    stats["palo_alto_traffic_drop_malicious_to_suspicious"] = int(traffic_drop_change.sum())
-    stats["palo_alto_traffic_drop_cluster_rows"] = int(palo_alto_traffic_drop.sum())
-    submission.loc[palo_alto_traffic_drop, "pred_label"] = "suspicious"
+    stats["palo_alto_traffic_drop_cluster_rows_untouched"] = int(palo_alto_traffic_drop.sum())
+
+    # This semantically benign-looking cluster is unscored and stays opt-in.
+    mssql_success = (
+            pipeline.eq("syslog")
+            & product.eq("")
+            & message.str.contains(
+                '"event":{"action":"Logon","code":"18453"',
+                case=False, regex=False, na=False,
+            )
+            & message.str.contains('"outcome":"success"', case=False, regex=False, na=False)
+            & message.str.contains("Login succeeded for user", case=False, regex=False, na=False)
+            & submission.pred_label.eq("malicious")
+    )
+    stats["mssql_success_candidate_rows"] = int(mssql_success.sum())
+    if enable_mssql_success:
+        submission.loc[mssql_success, "pred_label"] = "benign"
+        stats["mssql_success_to_benign"] = int(mssql_success.sum())
+
+    # The competition test contains a small Winlogbeat/agent OOD slice whose
+    # product field is empty.  These rules are deliberately exact: each one
+    # is backed by a stable event code/provider/message and by a pure (or
+    # overwhelmingly benign) training signature. They remain opt-in: the
+    # combined policy was worse online than the verified baseline.
+    structured_masks = {
+        "security_521_crash_on_audit_fail_to_benign": (
+            pipeline.eq("syslog")
+            & product.eq("")
+            & message.str.contains('"provider":"Security"', case=False, regex=False, na=False)
+            & message.str.contains('"code":"521"', case=False, regex=False, na=False)
+            & message.str.contains("CrashOnAuditFail", case=False, regex=False, na=False)
+        ),
+        "service_control_7036_to_benign": (
+            pipeline.eq("syslog")
+            & product.eq("")
+            & message.str.contains('"provider":"Service Control Manager"', case=False, regex=False, na=False)
+            & message.str.contains('"code":"7036"', case=False, regex=False, na=False)
+            & message.str.contains("service entered the", case=False, regex=False, na=False)
+        ),
+        "mssql_backup_18268_to_benign": (
+            pipeline.eq("syslog")
+            & product.eq("")
+            & message.str.contains('"provider":"MSSQL$PAYGSQL01"', case=False, regex=False, na=False)
+            & message.str.contains('"code":"18268"', case=False, regex=False, na=False)
+            & message.str.contains("No user action is required", case=False, regex=False, na=False)
+        ),
+        "api_audit_to_benign": (
+            pipeline.eq("syslog")
+            & product.eq("")
+            & message.str.contains(" api_audit[", case=False, regex=False, na=False)
+        ),
+        "lastpass_success_to_benign": (
+            pipeline.eq("syslog")
+            & product.eq("")
+            & message.str.contains('"name":"LastPass"', case=False, regex=False, na=False)
+            & message.str.contains("result=success", case=False, regex=False, na=False)
+        ),
+        "artifact_integration_status_to_benign": (
+            pipeline.eq("syslog")
+            & product.eq("")
+            & message.str.contains("WitFoo-Artifact", case=False, regex=False, na=False)
+            & message.str.contains("integration_status", case=False, regex=False, na=False)
+        ),
+        "adfs_413_to_benign": (
+            pipeline.eq("syslog")
+            & product.eq("")
+            & message.str.contains('"provider":"AD FS Auditing"', case=False, regex=False, na=False)
+            & message.str.contains('"code":"413"', case=False, regex=False, na=False)
+        ),
+        "filebeat_metrics_to_benign": (
+            pipeline.eq("syslog")
+            & product.eq("")
+            & message.str.contains("filebeat:", case=False, regex=False, na=False)
+            & message.str.contains("Non-zero metrics in the last", case=False, regex=False, na=False)
+        ),
+        "scheduled_job_failed_to_benign": (
+            pipeline.eq("syslog")
+            & product.eq("")
+            & message.str.contains("Scheduled job failed. (deviceInfo)", case=False, regex=False, na=False)
+        ),
+        "lambda_init_start_to_benign": (
+            pipeline.eq("syslog")
+            & product.eq("")
+            & message.str.startswith("INIT_START Runtime Version:", na=False)
+        ),
+        "vcenter_eam_stacktrace_to_benign": (
+            pipeline.eq("syslog")
+            & product.eq("")
+            & message.str.contains(" vcenter eam-", case=False, regex=False, na=False)
+            & ~message.str.contains(" vcenter analytics ", case=False, regex=False, na=False)
+            & ~message.str.contains(" vcenter dnsmasq ", case=False, regex=False, na=False)
+        ),
+        "vcenter_dnsmasq_to_benign": (
+            pipeline.eq("syslog")
+            & product.eq("")
+            & message.str.contains(" vcenter dnsmasq ", case=False, regex=False, na=False)
+        ),
+        "vcenter_analytics_to_benign": (
+            pipeline.eq("syslog")
+            & product.eq("")
+            & message.str.contains(" vcenter analytics ", case=False, regex=False, na=False)
+        ),
+        "aws_vpc_reject_ok_to_suspicious": (
+            pipeline.eq("syslog")
+            & product.eq("")
+            & message.str.contains(" REJECT OK", case=False, regex=False, na=False)
+        ),
+        "schannel_36887_to_suspicious": (
+            pipeline.eq("syslog")
+            & product.eq("")
+            & message.str.contains('"provider":"Schannel"', case=False, regex=False, na=False)
+            & message.str.contains('"code":"36887"', case=False, regex=False, na=False)
+        ),
+    }
+    for name, mask in structured_masks.items():
+        suspicious_target = name in {"schannel_36887_to_suspicious", "aws_vpc_reject_ok_to_suspicious"}
+        target_label = "suspicious" if suspicious_target else "benign"
+        change = mask & submission.pred_label.ne(target_label)
+        stats[name + "_candidate_rows"] = int(mask.sum())
+        stats[name + "_would_change_rows"] = int(change.sum())
+        if enable_structured_ood_fixes:
+            submission.loc[mask, "pred_label"] = (
+                target_label
+            )
+            stats[name + "_applied_rows"] = int(change.sum())
+        else:
+            stats[name + "_applied_rows"] = 0
     return stats
 
 
@@ -121,11 +251,23 @@ def validate_submission(result: pd.DataFrame, official: pd.DataFrame) -> None:
         raise AssertionError("submission contains an invalid label")
 
 
-def build_submission(input_path: str, base_path: str, output_path: str) -> tuple[pd.DataFrame, dict]:
+def build_submission(
+    input_path: str,
+    base_path: str,
+    output_path: str,
+    *,
+    enable_mssql_success: bool = False,
+    enable_structured_ood_fixes: bool = False,
+) -> tuple[pd.DataFrame, dict]:
     official = pd.read_csv(input_path)
     validate_official_input(official, input_path)
     result = load_base_predictions(base_path, official)
-    stats = apply_high_confidence_rules(official, result)
+    stats = apply_high_confidence_rules(
+        official,
+        result,
+        enable_mssql_success=enable_mssql_success,
+        enable_structured_ood_fixes=enable_structured_ood_fixes,
+    )
     validate_submission(result, official)
     target = Path(output_path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -149,8 +291,28 @@ def main() -> int:
     parser.add_argument("--input", default=TEST_FILE)
     parser.add_argument("--base", default=DEFAULT_BASE)
     parser.add_argument("--output", default=DEFAULT_OUTPUT)
+    parser.add_argument(
+        "--enable-mssql-success", action="store_true",
+        help="Experimental: relabel the eight exact SQL Server success rows as benign.",
+    )
+    parser.add_argument(
+        "--enable-structured-ood-fixes", action="store_true",
+        help="Experimental: apply structured OOD corrections (default: off).",
+    )
+    parser.add_argument(
+        "--safe-baseline", action="store_true",
+        help="Disable OOD-aware corrections and reproduce the externally scored 0.96802513 baseline.",
+    )
     args = parser.parse_args()
-    _, stats = build_submission(args.input, args.base, args.output)
+    if args.safe_baseline and (args.enable_mssql_success or args.enable_structured_ood_fixes):
+        parser.error("--safe-baseline cannot be combined with experimental rule flags")
+    _, stats = build_submission(
+        args.input,
+        args.base,
+        args.output,
+        enable_mssql_success=args.enable_mssql_success,
+        enable_structured_ood_fixes=args.enable_structured_ood_fixes,
+    )
     print(f"saved: {args.output}")
     for key, value in stats.items():
         print(f"{key}: {value}")

@@ -34,8 +34,12 @@ logs-new/
 # 训练生成的模型制品（可由 train_security_model_v3.py 重新生成）
 models/
 models_v3/
+models_v4/
 output/
 solution/*.csv
+# 例外：官方已评分基线，build_competition_submission.py 显式依赖它
+# （仅 1.3MB，纳入版本控制以保证提交链路可复现）
+!solution/0.96802513.csv
 
 # ===== 大型数据与历史快照 =====
 # 大 Parquet/CSV 数据与历史实验快照不入库

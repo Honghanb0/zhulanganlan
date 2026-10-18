@@ -1,4 +1,4 @@
-"""Competition-aligned metrics and threshold optimization for model v3."""
+"""Standard classification metrics and a project-local threshold proxy."""
 from __future__ import annotations
 
 import numpy as np
@@ -16,7 +16,7 @@ LABELS = np.array([0, 1, 2], dtype=np.int8)
 
 def evaluate_predictions(y_true: np.ndarray, y_pred: np.ndarray,
                          proba: np.ndarray | None = None) -> dict:
-    """Return all official score components plus precision/recall/F1/AUC."""
+    """Return standard metrics and the local proxy score; official scoring is unknown."""
     y_true = np.asarray(y_true, dtype=np.int8)
     y_pred = np.asarray(y_pred, dtype=np.int8)
     yt = y_true != 0
@@ -36,7 +36,7 @@ def evaluate_predictions(y_true: np.ndarray, y_pred: np.ndarray,
     threat_class_recall = float((r[1] + r[2]) / 2)
     macro_f1 = float(f.mean())
     balanced_accuracy = float(r.mean())
-    final_score = (
+    local_proxy_score = (
         0.40 * threat_f1
         + 0.25 * threat_recall
         + 0.15 * threat_class_recall
@@ -63,7 +63,7 @@ def evaluate_predictions(y_true: np.ndarray, y_pred: np.ndarray,
         "threat_class_recall": threat_class_recall,
         "soft_label_score": float(soft),
         "balanced_accuracy": balanced_accuracy,
-        "competition_score": float(final_score),
+        "local_proxy_score": float(local_proxy_score),
         "confusion_matrix": confusion_matrix(y_true, y_pred, labels=LABELS).tolist(),
         "false_positives": fp,
         "false_negatives": fn,
@@ -110,7 +110,11 @@ def threshold_predict(proba: np.ndarray, threat_threshold: float,
 def optimize_thresholds(y_true: np.ndarray, multiclass_proba: np.ndarray,
                         threat_proba: np.ndarray, subtype_proba: np.ndarray,
                         config: dict) -> tuple[dict, np.ndarray, np.ndarray]:
-    """Optimize the complete official score subject to recall safeguards."""
+    """Optimize the project-local proxy subject to recall safeguards.
+
+    AUC is threshold-independent, so omit it while scanning the grid and
+    compute the full metric payload once for the selected policy.
+    """
     best = None
     best_pred = None
     best_proba = None
@@ -121,7 +125,10 @@ def optimize_thresholds(y_true: np.ndarray, multiclass_proba: np.ndarray,
             for tt in config["threat_thresholds"]:
                 for mt in config["malicious_thresholds"]:
                     pred = threshold_predict(proba, tt, mt)
-                    metrics = evaluate_predictions(y_true, pred, proba)
+                    # Threshold search only needs discrete metrics. Recomputing
+                    # ROC-AUC for every candidate makes the O(N * grid) scan
+                    # needlessly expensive without changing the objective.
+                    metrics = evaluate_predictions(y_true, pred)
                     candidate = {
                         "threat_weight": float(tw),
                         "subtype_weight": float(sw),
@@ -129,7 +136,7 @@ def optimize_thresholds(y_true: np.ndarray, multiclass_proba: np.ndarray,
                         "malicious_threshold": float(mt),
                         "metrics": metrics,
                     }
-                    key = (metrics["competition_score"], metrics["threat_f1"])
+                    key = (metrics["local_proxy_score"], metrics["threat_f1"])
                     if fallback is None or key > fallback[0]:
                         fallback = (key, candidate, pred.copy(), proba.copy())
                     feasible = (
@@ -141,4 +148,5 @@ def optimize_thresholds(y_true: np.ndarray, multiclass_proba: np.ndarray,
     selected = best if best is not None else fallback
     assert selected is not None
     selected[1]["recall_constraints_satisfied"] = best is not None
+    selected[1]["metrics"] = evaluate_predictions(y_true, selected[2], selected[3])
     return selected[1], selected[2], selected[3]

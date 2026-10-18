@@ -22,7 +22,7 @@
   - [特征工程管道](#3-特征工程管道)
   - [层次集成模型](#4-层次集成模型)
   - [概率融合与动态阈值](#5-概率融合与动态阈值)
-  - [无泄漏分组交叉验证](#6-无泄漏分组交叉验证)
+  - [模板分组交叉验证](#6-模板分组交叉验证有限防泄漏)
   - [比赛提交后处理](#7-比赛提交后处理)
 - [复杂度分析总览](#复杂度分析总览)
 - [代码结构](#代码结构)
@@ -90,9 +90,9 @@
         │                           │                           │
         ▼                           │                           │
  SecurityFeaturePipeline            │                           │
-  (特征工程, 无泄漏)                │                           │
+  (折内拟合频率映射)                │                           │
         │                           │                           │
-        ├────── StratifiedGroupKFold (3折, 模板不跨折)          │
+        ├────── StratifiedGroupKFold (3折, 消息模板不跨折)      │
         │              │                                       │
         │              ▼                                       │
         │       层次集成训练 ──► OOF 概率 ──► optimize_thresholds│
@@ -271,7 +271,7 @@ pred[threat] = np.where(p_mal_given_threat >= malicious_threshold, 2, 1)  # 威�
 
 #### 网格寻优 + 召回硬约束
 
-在 OOF 概率上对「集成权重 × 威胁阈值 × 恶意阈值」做笛卡尔网格扫描，**直接最大化官方完整加权得分**，同时硬约束恶意召回与威胁召回均 ≥ 0.97：
+在 OOF 概率上对「集成权重 × 威胁阈值 × 恶意阈值」做笛卡尔网格扫描，最大化 `security_metrics.py` 中的**项目内代理目标**，同时硬约束恶意召回与威胁召回均 ≥ 0.97。该代理公式不是已确认的官方评分规则，且阈值选择与 OOF 指标来自同一批数据，不能当作无偏泛化估计：
 
 ```python
 feasible = (recall_malicious >= minimum_malicious_recall
@@ -284,37 +284,38 @@ feasible = (recall_malicious >= minimum_malicious_recall
 
 阈值寻优遍历 `len(ensemble_weights)² × len(threat_thresholds) × len(malicious_thresholds)` 个组合（默认 9 × 21 × 13 ≈ 2457），每次评估 O(N)，总复杂度 O(N × 组合数)。由于 OOF 样本仅 15 万量级且组合数有限，代价完全可接受。
 
-### 6. 无泄漏分组交叉验证
+### 6. 模板分组交叉验证（有限防泄漏）
 
 **文件**：`train_security_model_v3.py:cross_validate` + `security_features.py:make_group_ids`
 
-这是本项目**最关键的防泄漏设计**。旧方案用随机 `StratifiedKFold`，会把同一消息模板的重复样本分到训练折和验证折，导致验证分数虚高（接近 1）。
+这是用于降低重复模板泄漏风险的设计，不等于完整的分布外验证。旧方案用随机 `StratifiedKFold`，会把同一消息模板的重复样本分到训练折和验证折，导致验证分数虚高（接近 1）。
 
-v3 改用 `StratifiedGroupKFold`，用 `product_name + message_sanitized` 的稳定哈希作为分组 ID：
+v3 改用 `StratifiedGroupKFold`，用 `message_sanitized` 的稳定哈希作为分组 ID：
 
 ```python
 def make_group_ids(df):
     message = df["message_sanitized"]
-    product = df["product_name"]
-    return hash_pandas_object(product + "\x1f" + message, index=False)
+    return hash_pandas_object(message, index=False)
 ```
 
-**相同 `product_name + message_sanitized` 模板永远不会跨训练折与验证折**，从根上杜绝「背答案」式泄漏。同时特征管道的 `fit`（频率映射、类别映射）严格在每折训练集内独立进行，验证折只做 `transform`。
+相同 `message_sanitized`（包括空消息）不会跨训练折与验证折，避免文本哈希特征在产品名不同或消息为空时共享信息。它仍不能隔离采集源、时间和近似模板造成的混杂。特征管道的 `fit`（频率映射、类别映射）在每折训练集内独立进行，验证折只做 `transform`。
 
 ### 7. 比赛提交后处理
 
 **文件**：`build_competition_submission.py`
 
-提交生成器是独立于训练的**榜单后处理链路**。它从官方已评分的 `solution/0.96802513.csv` 基线出发，施加若干经榜单验证的高置信规则（均不改动行数，仅改 `pred_label`）：
+提交生成器是独立于训练的**榜单后处理链路**。默认直接复现官方已评分的 `solution/0.96802513.csv`，不应用未经线上验证的修正。已通过线上结果支持的规则包括：
 
 | 规则 | 作用 |
 |------|------|
 | `payload → malicious` | 采集管道为 payload 的样本判为恶意 |
-| `Windows Active Directory → benign` | 训练先验 99.94% 为良性，修正 OOD 误报 |
-| `Accepted password/publickey → benign` | 成功的 SSH 认证属正常行为 |
-| `Palo Alto ,TRAFFIC,drop, → suspicious` | 精确 syslog 簇的阻断尝试从 malicious 细分为 suspicious |
+| `Windows Active Directory → benign` | 已包含在官方验证基线中 |
+| `Accepted password/publickey → benign` | 已包含在官方验证基线中 |
+| Palo Alto `,TRAFFIC,drop,` | 明确禁用；该 OOD 簇曾使官方得分由 0.96802513 降至 0.96200413 |
 
-每条规则都是**精确、结构化的布尔掩码**（`pipeline.eq("syslog") & product.eq("") & message.str.contains(",TRAFFIC,drop,")`），刻意避免「通用 deny 规则」带来的误伤。
+SQL Server `18453` 登录成功和结构化 OOD 规则仅作为显式实验开关保留，默认关闭。虽然这些测试模板在训练集有很高标签纯度，但将 SQL Server 与 OOD 规则组合应用后的提交 `solution/0.96693767.csv` 在线上得分为 **0.96693767**，低于安全基线 **0.96802513**。这说明训练模板纯度不能替代测试标签证据。
+
+本地 OOF 报告的综合分数为 0.999961，但验证样本是经过混合采样的 150,000 行，类别数量为 120,000/15,000/15,000，且与竞赛隐藏集分布不同。该结果不能用于承诺线上分数；线上/线下背离主要来自测试集 OOD 模板与训练集标签先验不能可靠迁移。官方平台分数是唯一可确认的线上指标。
 
 生成后做**完整性与格式校验**：数据行恰好 55,837、物理行恰好 55,838（含表头）、event_id 与官方测试集一一对应、仅两列、标签合法。
 
@@ -341,7 +342,7 @@ def make_group_ids(df):
 config.py                         共享路径、标签和官方提交行数约束
 security_model_config.json        训练、特征、采样、模型与阈值配置
 security_features.py              实体关系、时间窗口、行为序列和安全语义特征
-security_metrics.py               官方评分、概率融合与阈值优化
+security_metrics.py               标准分类指标、本地代理目标、概率融合与阈值优化
 train_security_model_v3.py        分组 OOF 评测与最终训练入口
 infer_security_model_v3.py        v3 模型批量推理入口
 build_competition_submission.py   生成并严格校验 55,838 行比赛 CSV
@@ -358,7 +359,7 @@ data/valid_input.parquet          无标签批量推理集
 models_v3/security_model_v3.joblib
 solution/0.96802513.csv           官方已评分结果，作为最终提交规则修正的基线
 output/v3_evaluation/             v3 OOF 指标、混淆矩阵和旧方案对比快照
-output/res_0.97214580_target.csv  当前目标提交文件
+output/res_0.97297170_target.csv   当前安全提交文件（复现已验证基线）
 ```
 
 注意：`data/test_input.parquet` 是 4,234,041 行的另一批数据，不是比赛评测集。比赛 CSV 的 55,838 行包含一行表头，即 55,837 条预测。
@@ -388,7 +389,7 @@ python train_security_model_v3.py --mode evaluate
 python train_security_model_v3.py --mode train
 ```
 
-正式评测配置位于 `security_model_config.json`。随机种子固定为 42，相同 `product_name + message_sanitized` 模板不会跨训练折与验证折。
+正式评测配置位于 `security_model_config.json`。随机种子固定为 42，相同 `message_sanitized` 不会跨训练折与验证折。
 
 ## 推理
 
@@ -412,15 +413,15 @@ python infer_security_model_v3.py data/valid_input.parquet output/v3_valid_predi
 python build_competition_submission.py
 ```
 
-输出 `output/res_0.97214580_target.csv`。生成器从官方已评分的 0.96802513 基线出发，仅将空产品名 syslog 中精确的 Palo Alto `,TRAFFIC,drop,` 簇从 `malicious` 细分为 `suspicious`；不会改动 payload，也不会扩大为通用 deny 规则。
+输出 `output/res_0.97297170_target.csv`。默认输出与官方已评分的 `solution/0.96802513.csv` 完全一致；`--safe-baseline` 是显式兼容选项。SQL Server / 结构化 OOD 规则只能通过 `--enable-mssql-success`、`--enable-structured-ood-fixes` 显式开启，它们尚未被单独线上验证，已知组合候选低于安全基线。
 
 生成后自动验证：数据行恰好 55,837，含表头物理行恰好 55,838；event_id 与官方测试集完整、一一对应；仅包含 `event_id,pred_label`；标签只能是 benign、suspicious、malicious。
 
 ## 已复现指标
 
-150,000 条严格模板分组 OOF：
+150,000 条混合采样的模板分组 OOF（内部诊断，不代表官方隐藏集表现）：
 
-| 方案 | Macro F1 | Threat Recall | Malicious Recall | 综合得分 |
+| 方案 | Macro F1 | Threat Recall | Malicious Recall | 本地代理分 |
 |---|---:|---:|---:|---:|
 | v3 单模型消融 | 0.999963 | 0.999967 | 1.000000 | 0.999961 |
 | v3 层次集成 | 0.999963 | 0.999967 | 1.000000 | 0.999961 |
@@ -428,6 +429,10 @@ python build_competition_submission.py
 详细混淆矩阵和特征重要性见 `output/v3_evaluation/REPORT.md`。
 
 > **说明**：由于当前训练标签存在极强的采集源/时间/模板规律，本地高分不能替代无标签公开榜或未来时段的真实泛化结果。v3 的关键收益是把召回约束、困难负样本、跨实体行为特征和阈值策略固化为可复现链路。
+
+当前官方已知结果：`solution/0.96802513.csv` 得分 0.96802513；叠加实验性 SQL/OOD 重标规则的 `solution/0.96693767.csv` 得分 0.96693767。由于目标标签不可见，当前没有证据证明任何可生成候选达到 0.97297170，故默认保留线上最佳已验证文件。
+
+无绝对年月日特征的 v4 候选在同一 150,000 行混合采样 OOF 上没有改善本地代理分；相对线上最佳基线，它在官方测试集改判了 11,735 行。改判包括 5,815 条 `payload` 从 malicious 到 benign、2,667 条 `Windows Logs` 从 benign 到 malicious、2,425 条 `AWS Instance Backup` 从 benign 到 malicious。训练集没有 `payload` pipeline，而测试集的 5,837 条 `payload` 记录全部来自 2026-09-18 至 2026-09-20，训练标签未覆盖该来源和时段。没有测试标签或官方评分证据时，这些改判不能被认定为改进；因此没有用该模型覆盖已验证提交。文件名中的 `0.97297170` 是目标值，不是该文件的实际得分。
 
 ---
 

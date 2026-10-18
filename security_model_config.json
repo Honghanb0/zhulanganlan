@@ -17,7 +17,8 @@
   "features": {
     "hash_buckets": 16384,
     "rare_min_count": 5,
-    "window_seconds": [300, 3600, 86400]
+    "window_seconds": [300, 3600, 86400],
+    "include_absolute_calendar_features": false
   },
   "model": {
     "n_estimators": 1400,

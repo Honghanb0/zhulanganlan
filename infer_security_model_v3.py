@@ -38,10 +38,11 @@ def main() -> int:
                         help="Require the exact official test row count and two-column submission schema")
     args = parser.parse_args()
     artifact = joblib.load(args.model)
-    if args.input.lower().endswith(".csv"):
-        df = pd.read_csv(args.input)
+    input_path = str(args.input)
+    if input_path.lower().endswith(".csv"):
+        df = pd.read_csv(input_path)
     else:
-        df = pd.read_parquet(args.input)
+        df = pd.read_parquet(input_path)
     if "event_id" not in df:
         raise ValueError("input must contain event_id")
     if args.competition:
